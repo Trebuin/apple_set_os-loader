@@ -224,7 +224,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 0, FALSE, FALSE,
-        L"================== apple_set_os loader v0.5 =================="
+        L"================== apple_set_os loader v0.502a =================="
     );
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 1, FALSE, FALSE,
