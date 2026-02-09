@@ -19,7 +19,11 @@ https://github.com/0xbb/apple_set_os.efi
 5. If you dont have Windows installed, you need to bless the efi so the efi will run at startup.
 ```
 
-## Build via docker
+This is built via mac.  Windows should work but using cmd or powershell instead.  This requires docker to be installed and running
+1) Download the files and expand to a folder
+2) CD to the folder in terminal in MacOS
+## Build via docker (output file will be located in the same folder)
 ```bash
-docker build -t apple_set_os_loader . && docker run --rm -it -v $(pwd):/build apple_set_os_loader
+docker build --no-cache -t apple_set_os_loader .
+docker run --rm -it -v "$(pwd):/build" apple_set_os_loader
 ```
