@@ -11913,7 +11913,7 @@
 	21bf  TU116GL
 	21c4  TU116 [GeForce GTX 1660 SUPER]
 	21d1  TU116BM [GeForce GTX 1660 Ti Mobile]
-	2F04  GeForce RTX 5070 OC
+	2f04  GeForce RTX 5070 OC
 10df  Emulex Corporation
 	0720  OneConnect NIC (Skyhawk)
 		103c 1934  FlexFabric 20Gb 2-port 650M Adapter
