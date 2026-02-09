@@ -17,6 +17,12 @@ https://github.com/0xbb/apple_set_os.efi
 4. Copy bootx64.efi from this repository to /EFI/Boot
 
 5. If you dont have Windows installed, you need to bless the efi so the efi will run at startup.
+
+Update:
+When you start up using the option command to select the OS drive, you'll be presented a 5 second countdown where you can turn on/plug in your egpu before it proceeds.
+If it's already on, you'll see your device...possibly not existing.  If there's any issues, it will revert to bootx64_original.efi and you'll have a mix driver set which causes some odd issues.
+
+I'm using an external display and if you do the same, you could just disconnect the display from a direct connection to the apple device...this will elimiate the need for this loader.
 ```
 
 This is built via mac.  Windows should work but using cmd or powershell instead.  This requires docker to be installed and running
