@@ -32,4 +32,6 @@ This is built via mac.  Windows should work but using cmd or powershell instead.
 ```bash
 docker build --no-cache -t apple_set_os_loader .
 docker run --rm -it -v "$(pwd):/build" apple_set_os_loader
+rm -f bootx64.efi bootx64.so
+docker run --rm -it -v "$(pwd):/build" -w /build apple_set_os_loader make -B V=1
 ```
