@@ -23,6 +23,17 @@ When you start up using the option command to select the OS drive, you'll be pre
 If it's already on, you'll see your device...possibly not existing.  If there's any issues, it will revert to bootx64_original.efi and you'll have a mix driver set which causes some odd issues.
 
 I'm using an external display and if you do the same, you could just disconnect the display from a direct connection to the apple device...this will elimiate the need for this loader.
+
+v0.503a: 
+What you must do on the USB
+
+Format USB as FAT32 (or any filesystem your firmware exposes via SimpleFileSystem)
+
+Put an empty file at the root:
+
+WINBOOT.TAG
+
+Use your switched hub port to make the drive appear/disappear.
 ```
 
 This is built via mac.  Windows should work but using cmd or powershell instead.  This requires docker to be installed and running
