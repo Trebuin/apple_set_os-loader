@@ -6,7 +6,6 @@
 #include "include/int_dpath.h"
 #include "include/pci_db.h"
 
-
 #define APPLE_SET_OS_VENDOR  "Apple Inc."
 #define APPLE_SET_OS_VERSION "Mac OS X 10.15"
 
@@ -36,7 +35,7 @@ typedef struct {
    UINT8   HeaderType;
    UINT8   Bist;
 } PCI_COMMON_HEADER;
- 
+
 typedef struct {
    UINT32  Bar[6];               // Base Address Registers
    UINT32  CardBusCISPtr;        // CardBus CIS Pointer
@@ -51,7 +50,7 @@ typedef struct {
    UINT8   MinGnt;               // Min_Gnt
    UINT8   MaxLat;               // Max_Lat
 } PCI_DEVICE_HEADER;
- 
+
 typedef struct {
    UINT32  CardBusSocketReg;     // Cardus Socket/ExCA Base Address Register
    UINT8   CapabilitiesPtr;      // 14h in pci-cardbus bridge.
@@ -73,12 +72,12 @@ typedef struct {
    UINT8   InterruptPin;         // Interrupt Pin
    UINT16  BridgeControl;        // Bridge Control
 } PCI_CARDBUS_HEADER;
- 
+
 typedef union {
    PCI_DEVICE_HEADER   Device;
    PCI_CARDBUS_HEADER  CardBus;
 } NON_COMMON_UNION;
- 
+
 typedef struct {
    PCI_COMMON_HEADER Common;
    NON_COMMON_UNION  NonCommon;
@@ -86,6 +85,133 @@ typedef struct {
 } PCI_CONFIG_SPACE;
 #pragma pack(0)
 
+static BOOLEAN FileExistsOnDevice(EFI_BOOT_SERVICES* BS, EFI_HANDLE DevHandle, CHAR16* Path)
+{
+    EFI_STATUS Status;
+
+    EFI_GUID sfsGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL* Sfs = NULL;
+
+    EFI_FILE_PROTOCOL* Root = NULL;
+    EFI_FILE_PROTOCOL* File = NULL;
+
+    Status = BS->OpenProtocol(
+        DevHandle,
+        &sfsGuid,
+        (VOID**)&Sfs,
+        NULL,
+        NULL,
+        EFI_OPEN_PROTOCOL_GET_PROTOCOL
+    );
+    if (EFI_ERROR(Status) || Sfs == NULL) return FALSE;
+
+    Status = Sfs->OpenVolume(Sfs, &Root);
+    if (EFI_ERROR(Status) || Root == NULL) return FALSE;
+
+    Status = Root->Open(Root, &File, Path, EFI_FILE_MODE_READ, 0);
+
+    if (!EFI_ERROR(Status) && File != NULL) {
+        File->Close(File);
+        Root->Close(Root);
+        return TRUE;
+    }
+
+    Root->Close(Root);
+    return FALSE;
+}
+
+static EFI_STATUS TryLoadImageOnDevice(EFI_BOOT_SERVICES* BS, EFI_HANDLE ImageHandle, EFI_HANDLE DevHandle, CHAR16* EfiPath, EFI_HANDLE* OutHandle)
+{
+    EFI_DEVICE_PATH* DevicePath = _INT_FileDevicePath(BS, DevHandle, EfiPath);
+    if (DevicePath == NULL) return EFI_NOT_FOUND;
+
+    EFI_STATUS Status = BS->LoadImage(FALSE, ImageHandle, DevicePath, NULL, 0, OutHandle);
+    _INT_FreePool(BS, DevicePath);
+
+    return Status;
+}
+
+static EFI_STATUS ChooseAndLoadNextEfi(
+    EFI_BOOT_SERVICES* BS,
+    EFI_HANDLE ImageHandle,
+    EFI_HANDLE InternalEspHandle,
+    _INT_SimpleTextGraphicsStruct* gs,
+    EFI_HANDLE* OutDriverHandle
+)
+{
+    EFI_STATUS Status;
+
+    *OutDriverHandle = NULL;
+
+    CHAR16* TriggerPath = L"\\WINBOOT.TAG";
+    CHAR16* WinBootPath = L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi";
+    CHAR16* MacBootPath = L"\\EFI\\Boot\\bootx64_original.efi";
+
+    EFI_GUID sfsGuid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    EFI_HANDLE* FsHandles = NULL;
+    UINTN FsHandleCount = 0;
+
+    BOOLEAN TriggerPresent = FALSE;
+
+    // Detect trigger anywhere
+    Status = BS->LocateHandleBuffer(ByProtocol, &sfsGuid, NULL, &FsHandleCount, &FsHandles);
+    if (!EFI_ERROR(Status) && FsHandles != NULL) {
+        for (UINTN i = 0; i < FsHandleCount; i++) {
+            if (FileExistsOnDevice(BS, FsHandles[i], TriggerPath)) {
+                TriggerPresent = TRUE;
+                break;
+            }
+        }
+        _INT_FreePool(BS, FsHandles);
+        FsHandles = NULL;
+        FsHandleCount = 0;
+    }
+
+    if (TriggerPresent) {
+        _INT_SimpleTextGraphicsPrint(gs, 0, 3, TRUE, TRUE, L"USB trigger detected. Searching external Windows boot...");
+        _INT_SimpleTextGraphicsRefresh(gs);
+
+        // Attempt Windows from any filesystem except internal ESP
+        Status = BS->LocateHandleBuffer(ByProtocol, &sfsGuid, NULL, &FsHandleCount, &FsHandles);
+        if (!EFI_ERROR(Status) && FsHandles != NULL) {
+            for (UINTN i = 0; i < FsHandleCount; i++) {
+                if (FsHandles[i] == InternalEspHandle) continue;
+
+                EFI_HANDLE Candidate = NULL;
+                EFI_STATUS S2 = TryLoadImageOnDevice(BS, ImageHandle, FsHandles[i], WinBootPath, &Candidate);
+                if (!EFI_ERROR(S2) && Candidate != NULL) {
+                    *OutDriverHandle = Candidate;
+                    _INT_SimpleTextGraphicsPrint(gs, 0, 3, TRUE, TRUE, L"Loaded external Windows Boot Manager.");
+                    _INT_SimpleTextGraphicsRefresh(gs);
+                    break;
+                }
+            }
+            _INT_FreePool(BS, FsHandles);
+            FsHandles = NULL;
+            FsHandleCount = 0;
+        }
+
+        if (*OutDriverHandle == NULL) {
+            _INT_SimpleTextGraphicsPrint(gs, 0, 3, TRUE, TRUE, L"Windows boot not found. Falling back to macOS...");
+            _INT_SimpleTextGraphicsRefresh(gs);
+        }
+    } else {
+        _INT_SimpleTextGraphicsPrint(gs, 0, 3, TRUE, TRUE, L"No USB trigger. Booting macOS...");
+        _INT_SimpleTextGraphicsRefresh(gs);
+    }
+
+    // Fallback macOS original loader on internal ESP
+    if (*OutDriverHandle == NULL) {
+        Status = TryLoadImageOnDevice(BS, ImageHandle, InternalEspHandle, MacBootPath, OutDriverHandle);
+        if (EFI_ERROR(Status) || *OutDriverHandle == NULL) {
+            _INT_SimpleTextGraphicsPrint(gs, 0, 3, TRUE, TRUE, L"Unable to load bootx64_original.efi");
+            _INT_SimpleTextGraphicsRefresh(gs);
+            return EFI_NOT_FOUND;
+        }
+    }
+
+    return EFI_SUCCESS;
+}
 
 VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HANDLE ImageHandle)
 {
@@ -97,13 +223,12 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
     UINTN PciIoHandleCount = 0;
 
     Status = BS->LocateHandleBuffer(
-        ByProtocol, 
-        &efi_pci_io_guid, 
-        NULL, 
+        ByProtocol,
+        &efi_pci_io_guid,
+        NULL,
         &PciIoHandleCount,
         &PciIoHandleBuf
     );
-
 
     if (EFI_ERROR(Status)) {
         _INT_SimpleTextGraphicsPrint(
@@ -116,18 +241,18 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
             L"No PciIo Handles"
         );
     } else {
-        
+
         UINT16 NumOfGpu = 0;
 
         for (UINTN i = 0; i < PciIoHandleCount; i++) {
             EFI_PCI_IO_PROTOCOL* PciIo;
 
             Status = BS->OpenProtocol(
-                PciIoHandleBuf[i], 
-                &efi_pci_io_guid, 
-                (VOID**)&PciIo, 
-                ImageHandle, 
-                NULL, 
+                PciIoHandleBuf[i],
+                &efi_pci_io_guid,
+                (VOID**)&PciIo,
+                ImageHandle,
+                NULL,
                 EFI_OPEN_PROTOCOL_GET_PROTOCOL
             );
 
@@ -135,18 +260,18 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
                 PCI_COMMON_HEADER PciHeader;
 
                 PciIo->Pci.Read(
-                    PciIo, 
-                    EfiPciIoWidthUint16, 
-                    0, 
+                    PciIo,
+                    EfiPciIoWidthUint16,
+                    0,
                     1,
                     &PciHeader.VendorId
                 );
 
                 if (PciHeader.VendorId != 0xffff) {
                     PciIo->Pci.Read(
-                        PciIo, 
-                        EfiPciIoWidthUint32, 
-                        0, 
+                        PciIo,
+                        EfiPciIoWidthUint32,
+                        0,
                         sizeof(PciHeader) / sizeof(UINT32),
                         &PciHeader
                     );
@@ -159,17 +284,16 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
                             if (pci_vendor_db[vendorIdx]->vendorId == PciHeader.VendorId) {
                                 VendorStr = pci_vendor_db[vendorIdx]->vendorName;
 
-                                // binary search
                                 UINT16 minNumOfDevices = 0;
                                 UINT16 maxNumOfDevices = pci_vendor_db[vendorIdx]->numOfDevices - 1;
-        
+
                                 while (maxNumOfDevices >= minNumOfDevices) {
                                     UINT32 midNumOfDevices = (maxNumOfDevices + minNumOfDevices) / 2;
 
                                     if (PciHeader.DeviceId > pci_vendor_db[vendorIdx]->devices[midNumOfDevices].deviceId) {
                                         minNumOfDevices = midNumOfDevices + 1;
                                     } else if (PciHeader.DeviceId < pci_vendor_db[vendorIdx]->devices[midNumOfDevices].deviceId) {
-                                        maxNumOfDevices = midNumOfDevices - 1 ;
+                                        maxNumOfDevices = midNumOfDevices - 1;
                                     } else {
                                         DeviceStr = pci_vendor_db[vendorIdx]->devices[midNumOfDevices].deviceName;
                                         break;
@@ -203,7 +327,6 @@ VOID PrintGpu(EFI_BOOT_SERVICES* BS, _INT_SimpleTextGraphicsStruct* gs, EFI_HAND
     _INT_FreePool(BS, PciIoHandleBuf);
 }
 
-
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 {
     EFI_STATUS Status;
@@ -214,7 +337,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     _INT_SetGraphicsMode(BS, FALSE);
 
-
     _INT_SimpleTextGraphicsStruct gs;
     _INT_memset(&gs, 0, sizeof(_INT_SimpleTextGraphicsStruct));
     gs.BS = BS;
@@ -224,7 +346,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 0, FALSE, FALSE,
-        L"================== apple_set_os loader v0.502a Trebuin fork =================="
+        L"================== apple_set_os external windows loader v0.503a Trebuin fork =================="
     );
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 1, FALSE, FALSE,
@@ -235,10 +357,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         &gs, 0, 9, FALSE, TRUE,
         L"Connected Graphics Cards:"
     );
-    //update gpu info
     PrintGpu(BS, &gs, ImageHandle);
-
-
 
     // get apple_set_os protocol
     EFI_HANDLE* AppleSetOsHandleBuf;
@@ -246,13 +365,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     EFI_GUID apple_set_os_guid = APPLE_SET_OS_GUID;
     Status = BS->LocateHandleBuffer(
-        ByProtocol, 
-        &apple_set_os_guid, 
-        NULL, 
+        ByProtocol,
+        &apple_set_os_guid,
+        NULL,
         &AppleSetOsHandleCount,
         &AppleSetOsHandleBuf
     );
-    
+
     if (EFI_ERROR(Status)) {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 1, TRUE, TRUE,
@@ -282,82 +401,22 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         );
     }
 
-
-    // find and load bootx64_original.efi
-    EFI_LOADED_IMAGE_PROTOCOL* LoadedImage;
-	EFI_DEVICE_PATH* DevicePath = NULL;
-	EFI_HANDLE DriverHandle;
-
-    _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, FALSE, TRUE,
-        L"Initializing LoadedImageProtocol..."
-    );
+    // Initialize LoadedImageProtocol
+    EFI_LOADED_IMAGE_PROTOCOL* LoadedImage = NULL;
     EFI_GUID efi_loaded_image_protocol_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
-    Status = BS->HandleProtocol(ImageHandle, &efi_loaded_image_protocol_guid, (VOID**) &LoadedImage);
+
+    _INT_SimpleTextGraphicsPrint(&gs, 0, 3, FALSE, TRUE, L"Initializing LoadedImageProtocol...");
+    Status = BS->HandleProtocol(ImageHandle, &efi_loaded_image_protocol_guid, (VOID**)&LoadedImage);
     if (EFI_ERROR(Status) || LoadedImage == NULL) {
         goto halt;
     }
 
-    _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
-        L"Locating bootx64_original.efi..."
-    );
-    DevicePath = _INT_FileDevicePath(
-        BS, 
-        LoadedImage->DeviceHandle, 
-        L"\\EFI\\Boot\\bootx64_original.efi"
-    );
-
-    if (DevicePath == NULL) {
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 3, TRUE, TRUE,
-            L"Unable to find bootx64_original.efi"
-        );
+    // Choose what to boot (Windows external if trigger, else macOS original)
+    EFI_HANDLE DriverHandle = NULL;
+    Status = ChooseAndLoadNextEfi(BS, ImageHandle, LoadedImage->DeviceHandle, &gs, &DriverHandle);
+    if (EFI_ERROR(Status) || DriverHandle == NULL) {
         goto halt;
-	}
-
-    _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
-            L"Loading bootx64_original.efi to memory..."
-    );
-    // Attempt to load the driver.
-	Status = BS->LoadImage(FALSE, ImageHandle, DevicePath, NULL, 0, &DriverHandle);
-    _INT_FreePool(BS, DevicePath);
-    DevicePath = NULL;
-
-	if (EFI_ERROR(Status)) {
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 3, TRUE, TRUE,
-            L"Unable to load bootx64_original.efi to memory"
-        );
-		goto halt;
-	}
-
-    _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
-        L"Prepare to run bootx64_original.efi..."
-    );
-
-	Status = BS->OpenProtocol(
-        DriverHandle, 
-        &efi_loaded_image_protocol_guid,
-		(VOID**)&LoadedImage, 
-        ImageHandle, 
-        NULL, 
-        EFI_OPEN_PROTOCOL_GET_PROTOCOL
-    );
-	if (EFI_ERROR(Status)) {
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 3, TRUE, TRUE,
-            L"Failed to run bootx64_original.efi"
-        );
-		goto halt;
-	}
-
-    _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 3, TRUE, TRUE,
-        L" "
-    );
+    }
 
     _INT_SimpleTextGraphicsPrint(
         &gs, 0, 4, FALSE, TRUE,
@@ -367,15 +426,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
         &gs, 0, 5, FALSE, TRUE,
         L"Plug in your eGPU then press any key."
     );
-    
-
 
     EFI_INPUT_KEY Key;
+    _INT_memset(&Key, 0, sizeof(Key));
 
     for (UINT8 i = 6; i > 0; i--) {
         _INT_SimpleTextGraphicsPrint(
             &gs, 0, 6, TRUE, TRUE,
-            L"Booting bootx64_original.efi in %u second(s)", (UINT32)i
+            L"Booting selected EFI in %u second(s)", (UINT32)i
         );
 
         UINT16 MaxCycle = 20;
@@ -385,19 +443,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
             PrintGpu(BS, &gs, ImageHandle);
         }
 
-        // refresh screen when idle
         for (UINT16 j = 0; j < MaxCycle; j++) {
-            // each cycle is about 50ms 
             _INT_WaitForSingleEvent(BS, ConIn->WaitForKey, 450000);
             if (!EFI_ERROR(ConIn->ReadKeyStroke(ConIn, &Key))) {
-                // break loop
                 i = 1; j = 20;
             }
             _INT_SimpleTextGraphicsRefresh(&gs);
         }
     }
 
-    // disable apple_set_os if Z pressed
     if (Key.UnicodeChar == L'z' || Key.UnicodeChar == L'Z') {
         AppleSetOsHandleCount = 0;
         _INT_SimpleTextGraphicsPrint(
@@ -407,7 +461,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     }
 
     // load apple_set_os
-    for(UINTN i = 0; i < AppleSetOsHandleCount; i++) {
+    for (UINTN i = 0; i < AppleSetOsHandleCount; i++) {
         EFI_APPLE_SET_OS_IFACE* SetOsIface = NULL;
 
         Status = BS->OpenProtocol(
@@ -425,29 +479,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
                 L"SetOsProtocol Error: %lX", Status
             );
         } else {
-            if (SetOsIface->Version != 0){
-                _INT_SimpleTextGraphicsPrint(
-                    &gs, 0, 1, TRUE, TRUE,
-                    L"Setting OsVendor"
-                );
-                Status = SetOsIface->SetOsVendor((CHAR8*) APPLE_SET_OS_VENDOR);
-                if (EFI_ERROR(Status)){
-                    _INT_SimpleTextGraphicsPrint(
-                        &gs, 0, 1, TRUE, TRUE,
-                        L"OsVendor Error: %lX", Status
-                    );
+            if (SetOsIface->Version != 0) {
+                _INT_SimpleTextGraphicsPrint(&gs, 0, 1, TRUE, TRUE, L"Setting OsVendor");
+                Status = SetOsIface->SetOsVendor((CHAR8*)APPLE_SET_OS_VENDOR);
+                if (EFI_ERROR(Status)) {
+                    _INT_SimpleTextGraphicsPrint(&gs, 0, 1, TRUE, TRUE, L"OsVendor Error: %lX", Status);
                 }
 
-                _INT_SimpleTextGraphicsPrint(
-                    &gs, 0, 2, TRUE, TRUE,
-                    L"Setting OsVersion"
-                );
-                Status = SetOsIface->SetOsVersion((CHAR8*) APPLE_SET_OS_VERSION);
-                if (EFI_ERROR(Status)){
-                    _INT_SimpleTextGraphicsPrint(
-                        &gs, 0, 2, TRUE, TRUE,
-                        L"OsVersion Error: %lX", Status
-                    );
+                _INT_SimpleTextGraphicsPrint(&gs, 0, 2, TRUE, TRUE, L"Setting OsVersion");
+                Status = SetOsIface->SetOsVersion((CHAR8*)APPLE_SET_OS_VERSION);
+                if (EFI_ERROR(Status)) {
+                    _INT_SimpleTextGraphicsPrint(&gs, 0, 2, TRUE, TRUE, L"OsVersion Error: %lX", Status);
                 }
             }
         }
@@ -455,12 +497,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
 
     _INT_FreePool(BS, AppleSetOsHandleBuf);
 
-    _INT_SimpleTextGraphicsPrint(
-        &gs, 0, 6, TRUE, TRUE,
-        L"Booting bootx64_original.efi..."
-    );
+    _INT_SimpleTextGraphicsPrint(&gs, 0, 6, TRUE, TRUE, L"Booting selected EFI...");
 
-    // short delay
     for (UINT16 j = 0; j < 150; j++) {
         BS->Stall(10000);
     }
@@ -468,14 +506,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     ConOut->ClearScreen(ConOut);
     _INT_SetGraphicsMode(BS, TRUE);
 
-    // Load was a success - attempt to start the driver
     Status = BS->StartImage(DriverHandle, NULL, NULL);
     if (EFI_ERROR(Status)) {
         _INT_SetGraphicsMode(BS, FALSE);
-        _INT_SimpleTextGraphicsPrint(
-            &gs, 0, 6, TRUE, TRUE,
-            L"Unable to boot bootx64_original.efi"
-        );
+        _INT_SimpleTextGraphicsPrint(&gs, 0, 6, TRUE, TRUE, L"Unable to boot selected EFI");
         goto halt;
     }
 
@@ -483,7 +517,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE* SystemTable)
     return EFI_UNSUPPORTED;
 
 halt:
-    while (1) { 
+    while (1) {
         PrintGpu(BS, &gs, ImageHandle);
         for (UINT16 j = 0; j < 4000; j++) {
             BS->Stall(10000);
@@ -491,6 +525,5 @@ halt:
     }
 
     BS->Exit(ImageHandle, EFI_UNSUPPORTED, 0, NULL);
-
     return EFI_UNSUPPORTED;
 }
